@@ -96,6 +96,13 @@ in.
 Reverse the meaning of the cursor and Page Up/Down keys. For example, pressing
 the "down" cursor key will normally make the image move down. With this option,
 the image will instead move up.
+.\" unless NO_KENBURNS
+.TP
+.B -k
+Use kenburns effect in fullscreen slideshows. Note that this feature is
+EXPERIMENTAL and terribly slow. Use this option twice to activate scaling
+within the effect, which is even slower.
+.\" end
 .\" unless NO_COMMANDS
 .TP
 .B -<n>

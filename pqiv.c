@@ -53,6 +53,7 @@
 /* Compile time settings */
 #define DRAG_MAX_TIME 150
 #define SECONDS_TILL_LOADING_INFO 5 /* Undef to disable */
+#define KENBURNS_SPEED_ADJUST 40 /* Kenburns effect calls in ms */
 
 /* libc stuff */
 extern char *optarg;
@@ -116,14 +117,14 @@ static int       loadFilesChecked = 0;
 #endif
 
 /* Program settings */
-static char isFullscreen = FALSE;
+static gboolean isFullscreen = FALSE;
 static char infoBoxVisible = 0;
 static float scaledAt;
 static float zoom;
 static enum autoScaleSetting { OFF = 0, ON, ALWAYS } autoScale = ON;
 static int moveX, moveY;
 static int slideshowInterval = 3;
-static char slideshowEnabled = 0;
+static gboolean slideshowEnabled = 0;
 static int slideshowID = 0;
 static char aliases[128];
 #ifndef NO_INOTIFY
@@ -132,11 +133,11 @@ static int inotifyWd = -1;
 #endif
 
 /* Program options */
-static char optionHideInfoBox = FALSE;
+static gboolean optionHideInfoBox = FALSE;
 #ifndef NO_INOTIFY
-static char optionUseInotify = FALSE;
+static gboolean optionUseInotify = FALSE;
 #endif
-static char optionFollowSymlinks = FALSE;
+static gboolean optionFollowSymlinks = FALSE;
 static float optionInitialZoom = 1;
 static int optionWindowPosition[3] = {-1, -1, -1};
 static char optionHideChessboardLevel = 0;
@@ -148,15 +149,29 @@ static GdkInterpType optionInterpolation = GDK_INTERP_BILINEAR;
 
 #ifndef NO_FADING
 /* Stuff for fading between images */
-static char optionFadeImages = FALSE;
+static gboolean optionFadeImages = FALSE;
 struct fadeInfo {
 	GdkPixbuf *pixbuf;
 	int alpha;
 };
 #endif
 
+#ifndef NO_KENBURNS
+/* Kenburns effect */
+static enum { NO = 0, YES, WITH_SCALING } optionUseKenburns;
+struct {
+	int id;
+	int status;
+	float addX, addY;
+	float currX, currY;
+
+	float sizeX, sizeY;
+	float addSizeX, addSizeY;
+} kenburnsData;
+#endif
+
 /* Function prototypes */
-char reloadImage();
+gboolean reloadImage();
 void autoScaleFactor();
 void resizeAndPosWindow();
 void displayImage();
@@ -269,6 +284,10 @@ void helpMessage(char claim) { /* {{{ */
                 "                Default behaviour is to center the window \n"
 		" -R             Reverse meaning of cursor keys and Page Up/Down \n"
                 " -a nf          Define n as a keyboard alias for f \n"
+		#ifndef NO_KENBURNS
+		" -k             Use kenburns effect in fullscreen slideshows \n"
+		"                Use twice to activate scaling (Slow!) \n"
+		#endif
                 #ifndef NO_COMMANDS
                 " -<n> s         Set command number n (1-9) to s \n"
                 "                See manpage for advanced commands (starting with > or |) \n"
@@ -840,7 +859,7 @@ void sortFiles() {
 /* }}} */
 /*}}}*/
 /* Load images and modify them {{{ */
-char loadImage() { /*{{{*/
+gboolean loadImage() { /*{{{*/
 	/**
 	 * Load an image and display it
 	 */
@@ -1022,7 +1041,7 @@ void scaleBy(float add) { /*{{{*/
 	zoom += add;
 	scale();
 } /*}}}*/
-void flip(char horizontal) { /*{{{*/
+void flip(gboolean horizontal) { /*{{{*/
 	/*
 	 * Flip the image
 	 * You'll have to regenerate the scaled image!
@@ -1035,7 +1054,7 @@ void flip(char horizontal) { /*{{{*/
 
 	scaledAt = -1;
 } /*}}}*/
-void rotate(char left) { /*{{{*/
+void rotate(gboolean left) { /*{{{*/
 	/*
 	 * Rotate the image
 	 * You'll have to regenerate the scaled image!
@@ -1048,6 +1067,34 @@ void rotate(char left) { /*{{{*/
 
 	scaledAt = -1;
 } /*}}}*/
+void jumpFiles(int num) { /* {{{ */
+	int i, n, count, forwards;
+
+	if(num < 0) {
+		count = -num;
+		forwards = FALSE;
+	} else {
+		count = num;
+		forwards = TRUE;
+	}
+
+	i = currentFile->nr;
+	do {
+		for(n=0; n<count; n++) {
+			if(forwards) {
+				currentFile = currentFile->next;
+				if(currentFile == NULL) {
+					currentFile = &firstFile;
+				}
+			} else {
+				currentFile = currentFile->prev;
+				if(currentFile == NULL) {
+					currentFile = lastFile;
+				}
+			}
+		}
+	} while((!reloadImage()) && i != currentFile->nr);
+} /* }}} */
 /* }}} */
 /* Draw image to screen {{{ */
 #ifndef NO_COMPOSITING
@@ -1136,7 +1183,7 @@ void fadeImage(GdkPixbuf *image) { /*{{{*/
 } /*}}}*/
 /* }}} */
 #endif
-void setFullscreen(char fullscreen) { /*{{{*/
+void setFullscreen(gboolean fullscreen) { /*{{{*/
 	/**
 	 * Change to fullscreen view (and back)
 	 */
@@ -1266,7 +1313,7 @@ void displayImage() { /*{{{*/
 	/* Draw image */
 	gtk_image_set_from_pixbuf(GTK_IMAGE(imageWidget), scaledImage);
 } /*}}}*/
-char reloadImage() { /*{{{*/
+gboolean reloadImage() { /*{{{*/
 	/**
 	 * In fact, not only reload but also used to load images
 	 */
@@ -1323,6 +1370,111 @@ gboolean slideshowCb(gpointer data) { /*{{{*/
 	slideshowID = 0;
 	return FALSE;
 } /*}}}*/
+#ifndef NO_KENBURNS
+gboolean kenburnsCb(gpointer data) { /* {{{ */
+	int i, imgx, imgy, scrx, scry;
+	float myscale;
+	GdkScreen *screen;
+	GdkPixbuf *myScaledImage;
+
+	if(slideshowEnabled == FALSE) {
+		kenburnsData.id = 0;
+		reloadImage();
+		return FALSE;
+	}
+
+	if(kenburnsData.status == 0) {
+		DEBUG1("Kenburns: New image");
+		i = currentFile->nr;
+		do {
+			currentFile = currentFile->next;
+			if(currentFile == NULL) {
+				currentFile = &firstFile;
+			}
+		} while((!loadImage()) && i != currentFile->nr);
+
+		imgx = gdk_pixbuf_get_width(currentImage);
+		imgy = gdk_pixbuf_get_height(currentImage);
+		screen = gtk_widget_get_screen(window);
+		scrx = gdk_screen_get_width(screen);
+		scry = gdk_screen_get_height(screen);
+
+		if(imgx > scrx) {
+			kenburnsData.addX = (scrx - imgx) / (slideshowInterval * 1000 / KENBURNS_SPEED_ADJUST);
+			if(rand() > RAND_MAX / 2) {
+				kenburnsData.addX = -1 * kenburnsData.addX;
+				kenburnsData.currX = (scrx - imgx);
+			}
+		}
+		else {
+			kenburnsData.addX = 0;
+			kenburnsData.currX = (scrx - imgx) / 2;
+		}
+		if(imgy > scry) {
+			kenburnsData.addY = (scry - imgy) / (slideshowInterval * 1000 / KENBURNS_SPEED_ADJUST);
+			if(rand() > RAND_MAX / 2) {
+				kenburnsData.addY = -1 * kenburnsData.addY;
+				kenburnsData.currY = (scry - imgy);
+			}
+		}
+		else {
+			kenburnsData.addY = 0;
+			kenburnsData.currY = (scry - imgy) / 2;
+		}
+
+		if(optionUseKenburns == WITH_SCALING) {
+			myscale = 1 + rand() * 0.5 / RAND_MAX;
+			kenburnsData.addSizeX = imgx * (myscale - 1) / (slideshowInterval * 1000 / KENBURNS_SPEED_ADJUST);
+			kenburnsData.addSizeY = imgy * (myscale - 1) / (slideshowInterval * 1000 / KENBURNS_SPEED_ADJUST);
+
+			/* Scaling down should be faster */
+			myScaledImage = gdk_pixbuf_scale_simple(currentImage, (int)(imgx * myscale), (int)(imgy * myscale), GDK_INTERP_NEAREST);
+			g_object_unref(currentImage);
+			currentImage = myScaledImage;
+
+			if(rand() > RAND_MAX / 2) {
+				kenburnsData.sizeX = imgx * myscale;
+				kenburnsData.sizeY = imgy * myscale;
+				kenburnsData.addSizeY *= -1;
+				kenburnsData.addSizeX *= -1;
+			}
+			else {
+				kenburnsData.sizeX = imgx;
+				kenburnsData.sizeY = imgy;
+			}
+
+		
+			myScaledImage = gdk_pixbuf_scale_simple(currentImage, (int)(kenburnsData.sizeX), (int)(kenburnsData.sizeY), GDK_INTERP_NEAREST);
+			gtk_image_set_from_pixbuf(GTK_IMAGE(imageWidget), myScaledImage);
+			gtk_widget_set_size_request(imageWidget, (int)(kenburnsData.sizeX), (int)(kenburnsData.sizeY));
+			g_object_unref(myScaledImage);
+		}
+		else {
+			gtk_image_set_from_pixbuf(GTK_IMAGE(imageWidget), currentImage);
+			gtk_widget_set_size_request(imageWidget, imgx, imgy);
+		}
+
+		gtk_widget_set_size_request(mouseEventBox, scrx, scry);
+		setInfoText(NULL);
+	}
+
+	if(optionUseKenburns == WITH_SCALING) {
+		kenburnsData.sizeX += kenburnsData.addSizeX;
+		kenburnsData.sizeY += kenburnsData.addSizeY;
+		myScaledImage = gdk_pixbuf_scale_simple(currentImage, (int)(kenburnsData.sizeX), (int)(kenburnsData.sizeY), GDK_INTERP_NEAREST);
+		gtk_image_set_from_pixbuf(GTK_IMAGE(imageWidget), myScaledImage);
+		gtk_widget_set_size_request(imageWidget, (int)(kenburnsData.sizeX), (int)(kenburnsData.sizeY));
+		g_object_unref(myScaledImage);
+	}
+
+	gtk_fixed_move(GTK_FIXED(fixed), imageWidget, (int)kenburnsData.currX, (int)kenburnsData.currY);
+	kenburnsData.currX += kenburnsData.addX;
+	kenburnsData.currY += kenburnsData.addY;
+
+	kenburnsData.status = (kenburnsData.status + 1) % (slideshowInterval * 1000 / KENBURNS_SPEED_ADJUST);
+	return TRUE;
+} /* }}} */
+#endif
 inline void slideshowDo() { /*{{{*/
 	/**
 	 * Activate/deactivate slideshow
@@ -1335,10 +1487,26 @@ inline void slideshowDo() { /*{{{*/
 		g_source_remove(slideshowEnabled);
 		slideshowID = 0;
 	}
-	slideshowID = g_timeout_add(slideshowInterval * 1000, slideshowCb, NULL);
+
+	#ifndef NO_KENBURNS
+	if(kenburnsData.id != 0) {
+		g_source_remove(kenburnsData.id);
+		kenburnsData.id = 0;
+	}
+
+	if(isFullscreen == TRUE && optionUseKenburns) {
+		memset(&kenburnsData, 0, sizeof(kenburnsData));
+		kenburnsData.id = g_timeout_add(KENBURNS_SPEED_ADJUST, kenburnsCb, NULL);
+	}
+	else {
+	#endif
+		slideshowID = g_timeout_add(slideshowInterval * 1000, slideshowCb, NULL);
+	#ifndef NO_KENBURNS
+	}
+	#endif
 } /*}}}*/
 /* }}} */
-/* Jump dialog {{{ */
+/* Jump dialog  {{{ */
 gboolean doJumpDialog_searchListFilter(GtkTreeModel *model, GtkTreeIter *iter, gpointer data) { /* {{{ */
 	/**
 	 * List filter function for the jump dialog
@@ -1543,40 +1711,9 @@ inline void doJumpDialog() { /* {{{ */
 	g_object_unref(searchListFilter);
 	
 } /* }}} */
-void jumpFiles(int num) { /* {{{ */
-	int i, n, count, forwards;
-
-	if(num < 0) {
-		count = -num;
-		forwards = FALSE;
-	} else {
-		count = num;
-		forwards = TRUE;
-	}
-
-	i = currentFile->nr;
-	do {
-		for(n=0; n<count; n++) {
-			if(forwards) {
-				currentFile = currentFile->next;
-				if(currentFile == NULL) {
-					currentFile = &firstFile;
-				}
-			} else {
-				currentFile = currentFile->prev;
-				if(currentFile == NULL) {
-					currentFile = lastFile;
-				}
-			}
-			if(i == currentFile->nr) {
-				break;
-			}
-		}
-	} while((!reloadImage()) && i != currentFile->nr);
-} /* }}} */
 /* }}} */
 /* Keyboard & mouse event handlers {{{ */
-char mouseScrollEnabled = FALSE;
+gboolean mouseScrollEnabled = FALSE;
 gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{{*/
 	/**
 	 * Callback for keyboard events
@@ -1668,13 +1805,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			/* }}} */
 		/* BIND: Space: Next image {{{ */
 		case GDK_space:
-			i = currentFile->nr;
-			do {
-				currentFile = currentFile->next;
-				if(currentFile == NULL) {
-					currentFile = &firstFile;
-				}
-			} while((!reloadImage()) && i != currentFile->nr);
+			jumpFiles(1);
 			if(event->string[0] == 'x') {
 				/* This can't occour normaly but will when called by the
 				 * slideshow code
@@ -1941,13 +2072,7 @@ gboolean mouseButtonCb(GtkWidget *widget, GdkEventButton *event, gpointer data) 
 		}
 		else if(event->type == GDK_BUTTON_RELEASE && event->time - timeOfButtonPress <= 
 			DRAG_MAX_TIME) {
-			i = currentFile->nr;
-			do {
-				currentFile = event->button == 1 ? currentFile->next : currentFile->prev;
-				if(currentFile == NULL) {
-					currentFile = event->button == 1 ? &firstFile : lastFile;
-				}
-			} while((!reloadImage()) && i != currentFile->nr);
+			jumpFiles(event->button == 1 ? 1 : -1);
 		}
 	}
 	return FALSE;
@@ -2051,11 +2176,11 @@ int main(int argc, char *argv[]) {
 	char **envP;
 	char *fileName;
 	char *buf;
-	char optionFullScreen = FALSE;
+	gboolean optionFullScreen = FALSE;
 	#ifndef NO_SORTING	
-	char optionSortFiles = FALSE;
+	gboolean optionSortFiles = FALSE;
 	#endif
-	char optionReadStdin = FALSE;
+	gboolean optionReadStdin = FALSE;
 	FILE *optionsFile;
 	char **options;
 	char **parameterIterator;
@@ -2127,7 +2252,7 @@ int main(int argc, char *argv[]) {
 
 	memset(aliases, 0, sizeof(aliases));
 	opterr = 0;
-	while((option = getopt(optionCount, options, "ifFsSRnthrcwqz:P:p:d:a:1:2:3:4:5:6:7:8:9:")) > 0) {
+	while((option = getopt(optionCount, options, "ifFsSRnthrcwqkz:P:p:d:a:1:2:3:4:5:6:7:8:9:")) > 0) {
 		switch(option) {
 			/* OPTION: -i: Hide info box */
 			case 'i':
@@ -2246,6 +2371,13 @@ int main(int argc, char *argv[]) {
 				}
 				aliases[(unsigned int)optarg[0]] = optarg[1];
 				break;
+			#ifndef NO_KENBURNS
+			/* OPTION: -k: Use kenburns effect in fullscreen slideshows */
+			/* ADD: Use twice to activate scaling (Slow!) */
+			case 'k':
+				optionUseKenburns = (optionUseKenburns == NO) ? YES : WITH_SCALING;
+				break;
+			#endif
 			#ifndef NO_COMMANDS
 			/* OPTION: -<n> s: Set command number n (1-9) to s */
 			/* ADD: See manpage for advanced commands (starting with > or |) */
@@ -2478,6 +2610,12 @@ int main(int argc, char *argv[]) {
 		G_CALLBACK(windowStateCb), NULL);
 	/* }}} */
 	/* Initialize other stuff {{{ */
+
+	#ifndef NO_KENBURNS
+	/* Initialize kenburns structure */
+	memset(&kenburnsData, 0, sizeof(kenburnsData));
+	#endif
+
 	#ifndef NO_INOTIFY
 	/* Initialize inotify */
 	if(optionUseInotify == TRUE) {
