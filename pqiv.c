@@ -1371,6 +1371,12 @@ gboolean slideshowCb(gpointer data) { /*{{{*/
 	return FALSE;
 } /*}}}*/
 #ifndef NO_KENBURNS
+/*
+ * TODO
+ *
+ * This implementation of the kenburns effect HAS to be improved.
+ * Currently it's terribly slow and the zoom effect is ugly.
+ */
 gboolean kenburnsCb(gpointer data) { /* {{{ */
 	int i, imgx, imgy, scrx, scry;
 	float myscale;
