@@ -8,7 +8,7 @@ OPTIONS=( "no-sorting"		"Disable sorting of loaded files"		"-DNO_SORTING"		"lib/
 	  "no-commands"		"Disable support for external command execution" "-DNO_COMMANDS"	""
 	  "no-config-file"	"Disable support for a configuration file"	"-DNO_CONFIG_FILE"	""
 	  "no-inotify"		"Disable support for file monitoring"		"-DNO_INOTIFY"		""
-	  "kenburns"		"Enable support for kenburns-style slideshows (EXPERIMENTAL)" "-DNO_KENBURNS"	"-DNO_KENBURNS"
+	  "kenburns"		"Enable support for kenburns-style slideshows (EXPERIMENTAL)" ""	"-DNO_KENBURNS"
 	)
 
 # Load settings from Makefile
