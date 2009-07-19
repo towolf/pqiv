@@ -48,6 +48,7 @@
 #ifndef NO_INOTIFY
 #include <sys/inotify.h>
 #endif
+#include <getopt.h>
 /* }}} */
 /* Definitions {{{ */
 /* Compile time settings */
@@ -1593,6 +1594,31 @@ void jumpFiles(int num) { /* {{{ */
 /* }}} */
 /* Keyboard & mouse event handlers {{{ */
 char mouseScrollEnabled = FALSE;
+#ifdef SPECIAL_USECASES
+gboolean keyboardThroughStdinCb(GIOChannel *source, GIOCondition condition, gpointer data) { /* {{{ */
+	gchar *line;
+	gsize length;
+	GdkEventKey keyEvent;
+
+	DEBUG1("Read keyboard command from stdin");
+	if(g_io_channel_read_line(source, &line, &length, NULL, NULL) == G_IO_STATUS_NORMAL) {
+		if(length > 0) {
+			/* Emulate that keypress */
+			memset(&keyEvent, 0, sizeof(GdkEventKey));
+			keyEvent.type = GDK_KEY_PRESS;
+			keyEvent.window = window->window;
+			keyEvent.time = time(NULL);
+			keyEvent.keyval = line[0];
+			keyEvent.hardware_keycode = -1;
+			keyEvent.length = 1;
+			keyEvent.string = "x";
+			gdk_event_put((GdkEvent*)(&keyEvent));
+		}
+		g_free(line);
+	}
+	return TRUE;
+} /*}}}*/ 
+#endif
 gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{{*/
 	/**
 	 * Callback for keyboard events
@@ -2063,7 +2089,7 @@ int main(int argc, char *argv[]) {
 /* Variable definitions {{{ */
 	GdkColor color;
 	GtkWidget *fileChooser;
-	char option;
+	char currentOption;
 	char **envP;
 	char *fileName;
 	char *buf;
@@ -2079,6 +2105,10 @@ int main(int argc, char *argv[]) {
 	char **fileFormatExtensionsIterator;
 	GSList *fileFormatsIterator;
 	GString *stdinReader;
+	struct option longOptions[2];
+	#ifdef SPECIAL_USECASES
+	gboolean readFromStdin = FALSE;
+	#endif
 /* }}} */
 /* glib & threads initialization {{{ */
 	DEBUG1("Debug mode enabled");
@@ -2094,6 +2124,7 @@ int main(int argc, char *argv[]) {
 	envP = environ;
 	options = (char**)g_malloc((argc + 251) * sizeof(char*));
 	options[0] = argv[0];
+
 	#ifndef NO_CONFIG_FILE
 	while((buf = *envP++) != NULL) {
 		if(strncmp(buf, "HOME=", 5) != 0) {
@@ -2104,26 +2135,26 @@ int main(int argc, char *argv[]) {
 		optionsFile = fopen(fileName, "r");
 		
 		if(optionsFile) {
-			while((option = fgetc(optionsFile)) != EOF) {
+			while((currentOption = fgetc(optionsFile)) != EOF) {
 				if(optionCount > 250) {
 					die("Too many options; your configuration file "
 						"is restricted to 250 options");
 				}
-				if(option < 33) {
+				if(currentOption < 33) {
 					/* Ignore control characters / whitespace */
 					continue;
 				}
 				options[optionCount] = (char*)g_malloc(1024);
 				i = 0;
 				do {
-					if(option < 33) {
+					if(currentOption < 33) {
 						break;
 					}
-					options[optionCount][i++] = option;
+					options[optionCount][i++] = currentOption;
 					if(i == 1024) {
 						die("An option in ~/.pqivrc is too long");
 					}
-				} while((option = fgetc(optionsFile)) != EOF);
+				} while((currentOption = fgetc(optionsFile)) != EOF);
 				options[optionCount][i] = 0;
 				options[optionCount] = g_realloc(options[optionCount], i);
 				optionCount++;
@@ -2143,8 +2174,22 @@ int main(int argc, char *argv[]) {
 
 	memset(aliases, 0, sizeof(aliases));
 	opterr = 0;
-	while((option = getopt(optionCount, options, "ifFsSRnthrcwqz:P:p:d:a:1:2:3:4:5:6:7:8:9:")) > 0) {
-		switch(option) {
+
+	longOptions[0].name = NULL;
+
+	/* Define additional long options 
+	 * Documented in manpage only
+	 */
+	#ifdef SPECIAL_USECASES
+	longOptions[0].name = "keyboard-from-stdin";
+	longOptions[0].has_arg = 0;
+	longOptions[0].flag = NULL;
+	longOptions[0].val = '.';
+	longOptions[1].name = NULL;
+	#endif
+
+	while((currentOption = getopt_long(optionCount, options, "ifFsSRnthrcwqz:P:p:d:a:1:2:3:4:5:6:7:8:9:", longOptions, NULL)) > 0) {
+		switch(currentOption) {
 			/* OPTION: -i: Hide info box */
 			case 'i':
 				optionHideInfoBox = TRUE;	
@@ -2268,7 +2313,7 @@ int main(int argc, char *argv[]) {
 			case '1': case '2': case '3': case '4':
 			case '5': case '6': case '7': case '8':
 			case '9':
-				i = option - '0';
+				i = currentOption - '0';
 				if(optionCommands[i] != NULL) {
 					g_free(optionCommands[i]);
 				}
@@ -2287,6 +2332,15 @@ int main(int argc, char *argv[]) {
 				}
 				break;
 			#endif
+			/* Undocumented: . returned for --keyboard-from-stdin, read keyboard input
+			 * from stdin instead of GTK
+			 */
+			#ifdef SPECIAL_USECASES
+			case '.':
+				readFromStdin = TRUE;
+				break;
+			#endif
+			/* Defaults: Help message */
 			case '?':
 				helpMessage(optopt);
 			case 'h':
@@ -2339,16 +2393,16 @@ int main(int argc, char *argv[]) {
 	if(optionReadStdin == TRUE) {
 		stdinReader = g_string_new(NULL);
 		do {
-			option = getchar();
-			if(option == EOF) {
+			currentOption = getchar();
+			if(currentOption == EOF) {
 				break;
 			}
-			if(option == '\n' || option == '\r') {
+			if(currentOption == '\n' || currentOption == '\r') {
 				loadFilesAddFile(stdinReader->str);
 				g_string_truncate(stdinReader, 0);
 				continue;
 			}
-			g_string_append_c(stdinReader, option);
+			g_string_append_c(stdinReader, currentOption);
 		} while(TRUE);
 		g_string_free(stdinReader, TRUE);
 	}
@@ -2533,6 +2587,15 @@ int main(int argc, char *argv[]) {
 	}
 	setInfoText(NULL);
 	/* }}} */
+	#ifdef SPECIAL_USECASES
+	if(readFromStdin) {
+		g_io_add_watch(
+			g_io_channel_unix_new(0),
+			G_IO_IN,
+			keyboardThroughStdinCb,
+			NULL);
+	}
+	#endif
 	gtk_main();
 	return 0;
 }

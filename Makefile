@@ -3,7 +3,7 @@
 # Dynamic settings (changed by configure script)
 DESTDIR="/"
 PREFIX="/usr"
-OPTIONFLAGS= lib/strnatcmp.c      
+OPTIONFLAGS= lib/strnatcmp.c      -DSPECIAL_USECASES 
 BINARY_NAME="qiv"
 
 # Fixed settings

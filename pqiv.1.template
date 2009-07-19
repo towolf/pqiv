@@ -140,6 +140,14 @@ be searched recursively for files supported by gtk+
 the special file
 .B -
 will cause PQIV to read a file from stdin.
+.\" unless NO_SPECIAL_USECASES
+.SH SPECIAL FUNCTIONALITY
+These are special options, available since you compiled pqiv with
+SPECIAL_USECASES. Most people won't need these:
+.TP
+.B --keyboard-from-stdin
+Read lines from stdin and send them to the keyboard callback
+.\" end
 .SH USAGE
 In PQIV, you can use both mouse and keyboard to navigate through the images. Execute
 .B qiv -h
