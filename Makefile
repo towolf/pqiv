@@ -7,7 +7,7 @@ OPTIONFLAGS= lib/strnatcmp.c
 BINARY_NAME="pqiv"
 
 # Fixed settings
-REQUIRED_PACKAGES=gtk+-2.0 gthread-2.0 pango glib-2.0
+REQUIRED_PACKAGES=gtk+-3.0 gthread-2.0 pango glib-2.0
 SHELL=bash
 PACKAGE_VERSION:=$(shell awk '/RELEASE/ {print $$3}' pqiv.c | tr -d \" | head -n1)$(SUFFIX)
 OPTIONFLAGS+=-DBINARY_NAME='$(BINARY_NAME)'

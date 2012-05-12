@@ -77,8 +77,6 @@ static GdkPixbufAnimation *memoryArgAnimation = NULL;
 static GdkPixbuf *memoryArgImage = NULL;
 #endif
 
-static gchar emptyCursor[] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 /* Inline images: The chess board like one for transparent images and
  * the application's icon */
 static gchar *chessBoard = 
@@ -120,7 +118,7 @@ GTree* recursionCheckTree = NULL;
 
 static GTimeVal  programStart;
 #ifdef SECONDS_TILL_LOADING_INFO
-static gshort       loadFilesChecked = 0;
+static gshort	loadFilesChecked = 0;
 #endif
 
 /* Program settings */
@@ -749,7 +747,7 @@ void runProgram(gchar *command) { /*{{{*/
 } /*}}}*/
 #endif
 #ifndef NO_INOTIFY
-void inotifyCb(gpointer data, gint source_fd, GdkInputCondition condition) { /*{{{*/
+gboolean inotifyCb(GIOChannel *source, GIOCondition condition, gpointer data) { /*{{{*/
 	/**
 	 * Callback for inotify, gets called if the current image
 	 * has been modified
@@ -758,27 +756,29 @@ void inotifyCb(gpointer data, gint source_fd, GdkInputCondition condition) { /*{
 	struct inotify_event *event = g_new(struct inotify_event, 1);
 	DEBUG1("Inotify cb");
 
-	read(inotifyFd, event, sizeof(struct inotify_event));
+	read(g_io_channel_unix_get_fd(source), event, sizeof(struct inotify_event));
 	g_assert(event->len == 0); /* Should not happen according to manpage
 				    * The filename flag is only filled for
 				    * directory watches
 				    */
 	if(event->mask != IN_CLOSE_WRITE) {
 		g_free(event);
-		return;
+		return TRUE;
 	}
 	g_free(event);
 
 	/* We have to emulate a keypress because of some buggy wms */
 	memset(&keyEvent, 0, sizeof(GdkEventKey));
 	keyEvent.type = GDK_KEY_PRESS;
-	keyEvent.window = window->window;
+	keyEvent.window = gtk_widget_get_window(window);
 	keyEvent.time = time(NULL);
 	keyEvent.keyval = 114;
 	keyEvent.hardware_keycode = 27;
 	keyEvent.length = 1;
 	keyEvent.string = "r";
 	gdk_event_put((GdkEvent*)(&keyEvent));
+
+	return TRUE;
 } /*}}}*/
 #endif
 /* File sorting {{{ */
@@ -1168,37 +1168,34 @@ void getMonitorSizeR(GdkRectangle *rectangle) {/*{{{*/
 	gint monitor;
 
 	screen = gtk_widget_get_screen(window);
-	monitor = gdk_screen_get_monitor_at_window(gtk_widget_get_screen(window), window->window);
+	monitor = gdk_screen_get_monitor_at_window(gtk_widget_get_screen(window), gtk_widget_get_window(window));
 	gdk_screen_get_monitor_geometry(screen, monitor, rectangle);
 }/*}}}*/
 #ifndef NO_COMPOSITING
-gboolean exposeCb(GtkWidget *widget, GdkEventExpose *event, gpointer data) { /*{{{*/
+gboolean drawCb(GtkWidget *widget, cairo_t *cr, gpointer data) { /*{{{*/
 	/**
 	 * Taken from API documentation on developer.gnome.org
 	 * For real alpha :)
 	 */
-	cairo_t *cr;
-	DEBUG1("Expose");
-	cr = gdk_cairo_create(widget->window);
+	DEBUG1("Draw callback");
 	cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
-	gdk_cairo_region(cr, event->region);
-	cairo_fill(cr);
-	cairo_destroy(cr);
+
+	cairo_paint(cr);
 	return FALSE;
 } /*}}}*/
 /* Screen changed callback (for transparent window) {{{ */
 static void alphaScreenChangedCb(GtkWidget *widget, GdkScreen *old_screen, gpointer userdata) {
 	GdkScreen *screen;
-	GdkColormap *colormap;
+	GdkVisual *visual;
 	DEBUG1("Screen changed");
-	
+
 	screen = gtk_widget_get_screen(widget);
-	colormap = gdk_screen_get_rgba_colormap(screen);
-	if(!colormap) {
-		g_printerr("Sorry, alpha channels are not supported on this screen.\n");
-		die("Try again without -cc or activate compositing\n");
+	visual = gdk_screen_get_rgba_visual(screen);
+	if(visual == NULL) {
+	    g_printerr("Composited RGBA visuals are not available. You won't see transparency.\n");
+	    visual = gdk_screen_get_system_visual(screen);
 	}
-	gtk_widget_set_colormap(widget, colormap);
+	gtk_widget_set_visual(widget, visual);
 }
 /* }}} */
 #endif
@@ -1273,7 +1270,6 @@ void setFullscreen(gboolean fullscreen) { /*{{{*/
 	 * Change to fullscreen view (and back)
 	 */
 	GdkCursor *cursor;
-	GdkPixmap *source;
 	GdkRectangle scr;
 
 	DEBUG1("Fullscreen");
@@ -1285,31 +1281,24 @@ void setFullscreen(gboolean fullscreen) { /*{{{*/
 		gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
 		handlePendingEvents();
 		/* For users without window managers */
-		gdk_window_fullscreen(window->window);
+		gdk_window_fullscreen(gtk_widget_get_window(window));
 		handlePendingEvents();
 		gtk_window_move(GTK_WINDOW(window), scr.x, scr.y);
 		gtk_widget_set_size_request(window, scr.width, scr.height);
-		gtk_window_resize(GTK_WINDOW(window), scr.width, scr.height);
-		handlePendingEvents();
-		/* This is done by event cb now
-		 * gtk_window_set_resizable(GTK_WINDOW(window), FALSE);*/
+		gtk_widget_queue_resize(window);
 
 		/* Hide cursor */
-		source = gdk_bitmap_create_from_data (NULL, emptyCursor,
-                                       16, 16);
-		cursor = gdk_cursor_new_from_pixmap (source, source, (GdkColor*)emptyCursor,
-			(GdkColor*)emptyCursor, 8, 8);
-		gdk_pixmap_unref(source);
-		gdk_window_set_cursor(window->window, cursor);
-		gdk_cursor_unref(cursor);
+		cursor = gdk_cursor_new_for_display(gdk_window_get_display(gtk_widget_get_window(window)) ,GDK_BLANK_CURSOR);
+		gdk_window_set_cursor(gtk_widget_get_window(window), cursor);
+		g_object_unref(cursor);
 	}
 	else {
 		gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
 		handlePendingEvents();
-		gdk_window_unfullscreen(window->window);
+		gdk_window_unfullscreen(gtk_widget_get_window(window));
 		handlePendingEvents();
 		gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
-		gdk_window_set_cursor(window->window, NULL);
+		gdk_window_set_cursor(gtk_widget_get_window(window), NULL);
 	}
 } /*}}}*/
 void resizeAndPosWindow() { /*{{{*/
@@ -1329,13 +1318,14 @@ void resizeAndPosWindow() { /*{{{*/
 
 	if(!isFullscreen) {
 		/* In window mode, resize and reposition window */
-		gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
-		handlePendingEvents();
+		gtk_widget_set_size_request(fixed, imgx, imgy);
+		gtk_widget_set_size_request(infoLabelBox, imgx - imgx > 20 ? 20 : 0, -1);
+		gtk_widget_set_size_request(infoLabel, imgx - imgx > 20 ? 20 : 0, -1);
+		gtk_widget_queue_resize(infoLabel);
+
 		gtk_widget_set_size_request(mouseEventBox, imgx, imgy);
 		gtk_widget_set_size_request(window, imgx, imgy);
-		gtk_window_resize(GTK_WINDOW(window), imgx, imgy);
-		handlePendingEvents();
-		gtk_window_set_resizable(GTK_WINDOW(window), FALSE);
+		gtk_widget_queue_resize(window);
 		if(optionWindowPosition[2] == -1) {
 			gtk_window_move(GTK_WINDOW(window), scr.x + (scr.width - imgx) / 2, scr.y + (scr.height - imgy) / 2);
 		}
@@ -1406,7 +1396,7 @@ gboolean slideshowCb(gpointer data) { /*{{{*/
 	/* We have to emulate a keypress because of some buggy wms */
 	memset(&keyEvent, 0, sizeof(GdkEventKey));
 	keyEvent.type = GDK_KEY_PRESS;
-	keyEvent.window = window->window;
+	keyEvent.window = gtk_widget_get_window(window);
 	keyEvent.time = time(NULL);
 	keyEvent.keyval = 32;
 	keyEvent.hardware_keycode = 65;
@@ -1473,7 +1463,7 @@ gint doJumpDialog_exitOnEnter(GtkWidget *widget, GdkEventKey *event, gpointer da
 	/**
 	 * If return is pressed exit the dialog
 	 */
-	if(event->keyval == GDK_Return) {
+	if(event->keyval == GDK_KEY_Return) {
 		gtk_dialog_response(GTK_DIALOG(data), GTK_RESPONSE_ACCEPT);
 		return TRUE;
 	}
@@ -1553,7 +1543,7 @@ inline void doJumpDialog() { /* {{{ */
 		NULL);
 	
 	searchEntry = gtk_entry_new();
-	gtk_box_pack_start(GTK_BOX(GTK_DIALOG(dlgWindow)->vbox),
+	gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dlgWindow))),
 		searchEntry,
 		FALSE,
 		TRUE,
@@ -1600,7 +1590,7 @@ inline void doJumpDialog() { /* {{{ */
 	scrollBar = gtk_scrolled_window_new(NULL, NULL);
 	gtk_container_add(GTK_CONTAINER(scrollBar),
 		searchListBox);
-	gtk_box_pack_end(GTK_BOX(GTK_DIALOG(dlgWindow)->vbox),
+	gtk_box_pack_end(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(dlgWindow))),
 		scrollBar,
 		TRUE,
 		TRUE,
@@ -1709,7 +1699,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 
 	switch(event->keyval) {
 		/* BIND: Backspace: Previous image {{{ */
-		case GDK_BackSpace:
+		case GDK_KEY_BackSpace:
 			i = currentFile->nr;
 			do {
 				currentFile = currentFile->prev;
@@ -1720,39 +1710,39 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: PgUp: Jump 10 images forwards {{{ */
-		case GDK_Page_Up:
-		case GDK_KP_Page_Up:
+		case GDK_KEY_Page_Up:
+		case GDK_KEY_KP_Page_Up:
 			jumpFiles(optionReverseMovement ? -10 : 10);
 			break;
 			/* }}} */
 		/* BIND: PgDn: Jump 10 images backwards {{{ */
-		case GDK_Page_Down:
-		case GDK_KP_Page_Down:
+		case GDK_KEY_Page_Down:
+		case GDK_KEY_KP_Page_Down:
 			jumpFiles(optionReverseMovement ? 10: -10);
 			break;
 			/* }}} */
 		/* BIND: Escape: Quit {{{ */
-		case GDK_Escape:
+		case GDK_KEY_Escape:
 			gtk_main_quit();
 			break;
 			/* }}} */
 		/* BIND: Cursor keys: Move (Fullscreen) {{{ */
-		case GDK_Down:
-		case GDK_KP_Down:
-		case GDK_Up:
-		case GDK_KP_Up:
-		case GDK_Right:
-		case GDK_KP_Right:
-		case GDK_Left:
-		case GDK_KP_Left:
+		case GDK_KEY_Down:
+		case GDK_KEY_KP_Down:
+		case GDK_KEY_Up:
+		case GDK_KEY_KP_Up:
+		case GDK_KEY_Right:
+		case GDK_KEY_KP_Right:
+		case GDK_KEY_Left:
+		case GDK_KEY_KP_Left:
 			if(isFullscreen) {
-				if(event->keyval == GDK_Down || event->keyval == GDK_KP_Down) {
+				if(event->keyval == GDK_KEY_Down || event->keyval == GDK_KEY_KP_Down) {
 					i = (event->state & GDK_CONTROL_MASK ? 50 : 10);
-				} else if(event->keyval == GDK_Up || event->keyval == GDK_KP_Up) {
+				} else if(event->keyval == GDK_KEY_Up || event->keyval == GDK_KEY_KP_Up) {
 					i = -(event->state & GDK_CONTROL_MASK ? 50 : 10);
-				} else if(event->keyval == GDK_Right || event->keyval == GDK_KP_Right) {
+				} else if(event->keyval == GDK_KEY_Right || event->keyval == GDK_KEY_KP_Right) {
 					n = (event->state & GDK_CONTROL_MASK ? 50 : 10);
-				} else if(event->keyval == GDK_Left || event->keyval == GDK_KP_Left) {
+				} else if(event->keyval == GDK_KEY_Left || event->keyval == GDK_KEY_KP_Left) {
 					n = -(event->state & GDK_CONTROL_MASK ? 50 : 10);
 				}
 
@@ -1771,7 +1761,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: Space: Next image {{{ */
-		case GDK_space:
+		case GDK_KEY_space:
 			i = currentFile->nr;
 			do {
 				currentFile = currentFile->next;
@@ -1788,12 +1778,12 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: j: Jump to image {{{ */
-		case GDK_j:
+		case GDK_KEY_j:
 			doJumpDialog();
 			break;
 			/* }}} */
 		/* BIND: f: Fullscreen {{{ */
-		case GDK_f:
+		case GDK_KEY_f:
 			if(optionHideChessboardLevel < 2) {
 				moveX = moveY = 0;
 				setFullscreen(!isFullscreen);
@@ -1804,7 +1794,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: r: Reload {{{ */
-		case GDK_r:
+		case GDK_KEY_r:
 			/* If in -cc mode, preserve zoom level */
 			if(optionHideChessboardLevel > 1) {
 				savedZoom = zoom;
@@ -1821,8 +1811,8 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: +: Zoom in {{{ */
-		case GDK_plus:
-		case GDK_KP_Add:
+		case GDK_KEY_plus:
+		case GDK_KEY_KP_Add:
 			scaleBy(event->state & GDK_CONTROL_MASK ? .2 : .05);
 			resizeAndPosWindow();
 			displayImage();
@@ -1830,8 +1820,8 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: -: Zoom out {{{ */
-		case GDK_minus:
-		case GDK_KP_Subtract:
+		case GDK_KEY_minus:
+		case GDK_KEY_KP_Subtract:
 			scaleBy(-(event->state & GDK_CONTROL_MASK ? .2 : .05));
 			resizeAndPosWindow();
 			displayImage();
@@ -1839,8 +1829,8 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: 0: Autoscale down {{{ */
-		case GDK_0:
-		case GDK_KP_0:
+		case GDK_KEY_0:
+		case GDK_KEY_KP_0:
 			forceAutoScaleFactor(ON);
 			moveX = moveY = 0;
 			resizeAndPosWindow();
@@ -1849,12 +1839,12 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: q: Quit {{{ */
-		case GDK_q:
+		case GDK_KEY_q:
 			gtk_main_quit();
 			break;
 		/* }}} */
 		/* BIND: t: Toggle autoscale {{{ */
-		case GDK_t:
+		case GDK_KEY_t:
 			moveX = moveY = 0;
 			autoScale = (autoScale + 1) % 3;
 
@@ -1875,7 +1865,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 		/* }}} */
 		/* BIND: l: Rotate left {{{ */
-		case GDK_l:
+		case GDK_KEY_l:
 			#ifndef NO_ANIMATIONS
 			if(currentImageIsAnimated) {
 				setInfoText("Rotation not supported for animations");
@@ -1890,7 +1880,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: k: Rotate right {{{ */
-		case GDK_k:
+		case GDK_KEY_k:
 			#ifndef NO_ANIMATIONS
 			if(currentImageIsAnimated) {
 				setInfoText("Rotation not supported for animations");
@@ -1905,7 +1895,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: h: Horizontal flip {{{ */
-		case GDK_h:
+		case GDK_KEY_h:
 			#ifndef NO_ANIMATIONS
 			if(currentImageIsAnimated) {
 				setInfoText("Flipping not supported for animations");
@@ -1918,7 +1908,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: v: Vertical flip {{{ */
-		case GDK_v:
+		case GDK_KEY_v:
 			#ifndef NO_ANIMATIONS
 			if(currentImageIsAnimated) {
 				setInfoText("Flipping not supported for animations");
@@ -1931,7 +1921,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: i: Show/hide info box {{{ */
-		case GDK_i:
+		case GDK_KEY_i:
 			setInfoText(NULL);
 			infoBoxVisible = !infoBoxVisible;
 			if(infoBoxVisible == TRUE) {
@@ -1943,7 +1933,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: s: Slideshow toggle {{{ */
-		case GDK_s:
+		case GDK_KEY_s:
 			if(slideshowEnabled == TRUE) {
 				setInfoText("Slideshow disabled");
 				slideshowEnabled = FALSE;
@@ -1956,7 +1946,7 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			break;
 			/* }}} */
 		/* BIND: a: Hardlink current image to .qiv-select/ {{{ */
-		case GDK_a:
+		case GDK_KEY_a:
 			mkdir("./.qiv-select", 0755);
 			buf2 = basename(currentFile->fileName); /* Static memory, do not free */
 			buf = (char*)g_malloc(strlen(buf2) + 15);
@@ -1978,11 +1968,11 @@ gboolean keyboardCb(GtkWidget *widget, GdkEventKey *event, gpointer data) { /*{{
 			/* }}} */
 		#ifndef NO_COMMANDS
 		/* BIND: <n>: Run command n (1-3) {{{ */
-		case GDK_1: case GDK_2: case GDK_3: case GDK_4:
-		case GDK_5: case GDK_6: case GDK_7: case GDK_8:
-		case GDK_9:
-			g_assert(GDK_9 - GDK_0 == 9); /* I hope this will always work.. */
-			i = event->keyval - GDK_0; 
+		case GDK_KEY_1: case GDK_KEY_2: case GDK_KEY_3: case GDK_KEY_4:
+		case GDK_KEY_5: case GDK_KEY_6: case GDK_KEY_7: case GDK_KEY_8:
+		case GDK_KEY_9:
+			g_assert(GDK_KEY_9 - GDK_KEY_0 == 9); /* I hope this will always work.. */
+			i = event->keyval - GDK_KEY_0; 
 			if(optionCommands[i] != NULL) {
 				buf = (char*)g_malloc(15);
 				sprintf(buf, "Run command %c", event->keyval);
@@ -2014,8 +2004,9 @@ gboolean mouseButtonCb(GtkWidget *widget, GdkEventButton *event, gpointer data) 
 			if(isFullscreen == TRUE) {
 				getMonitorSize(&scrx, &scry);
 				scrx /= 2; scry /= 2;
-				gdk_display_warp_pointer(gdk_display_get_default(),
-					gdk_display_get_default_screen(gdk_display_get_default()), scrx, scry);
+
+				gdk_device_warp(gdk_device_manager_get_client_pointer(gdk_display_get_device_manager(gdk_window_get_display(gtk_widget_get_window(widget)))),
+				    gtk_widget_get_screen(widget), scrx, scry);
 			}
 			mouseScrollEnabled = TRUE;
 		}
@@ -2037,9 +2028,8 @@ gboolean mouseButtonCb(GtkWidget *widget, GdkEventButton *event, gpointer data) 
 		scrx /= 2; scry /= 2;
 
 		if(event->type == GDK_BUTTON_PRESS) {
-			gdk_display_warp_pointer(gdk_display_get_default(),
-				gdk_display_get_default_screen(gdk_display_get_default()),
-				scrx, scry);
+			gdk_device_warp(gdk_device_manager_get_client_pointer(gdk_display_get_device_manager(gdk_window_get_display(gtk_widget_get_window(widget)))),
+			    gtk_widget_get_screen(widget), scrx, scry);
 		}
 		else if(event->type == GDK_BUTTON_RELEASE) {
 			DEBUG1("Scale (Mousezoom)");
@@ -2105,8 +2095,8 @@ gint mouseMotionCb(GtkWidget *widget, GdkEventMotion *event, gpointer data) {
 			moveX += event->x - scrx;
 			moveY += event->y - scry;
 		}
-		gdk_display_warp_pointer(gdk_display_get_default(),
-			gdk_display_get_default_screen(gdk_display_get_default()), scrx, scry);
+		gdk_device_warp(gdk_device_manager_get_client_pointer(gdk_display_get_device_manager(gdk_window_get_display(gtk_widget_get_window(widget)))),
+		    gtk_widget_get_screen(widget), scrx, scry);
 
 		resizeAndPosWindow();
 	}
@@ -2201,7 +2191,7 @@ gboolean isFullscreenOnStartTimerCb(gpointer data) {/*{{{*/
 	isFullscreen = FALSE;
 	memset(&keyEvent, 0, sizeof(GdkEventKey));
 	keyEvent.type = GDK_KEY_PRESS;
-	keyEvent.window = window->window;
+	keyEvent.window = gtk_widget_get_window(window);
 	keyEvent.time = time(NULL);
 	keyEvent.keyval = 102;
 	keyEvent.hardware_keycode = 65;
@@ -2572,9 +2562,9 @@ int main(int argc, char *argv[]) {
 	gtk_window_set_title(GTK_WINDOW(window), "pqiv");
 	#ifndef NO_COMPOSITING
 	if(optionHideChessboardLevel > 1) {
+		gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
 		gtk_widget_set_app_paintable(window, TRUE);
 		alphaScreenChangedCb(window, NULL, NULL);
-		gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
 	}
 	#endif
 	gtk_window_set_icon(GTK_WINDOW(window),
@@ -2599,6 +2589,7 @@ int main(int argc, char *argv[]) {
 	/* Info label */
 	infoLabelBox = gtk_event_box_new();
 	infoLabel = gtk_label_new(NULL);
+	//gtk_label_set_ellipsize(GTK_LABEL(GTK_LABEL(infoLabel)), PANGO_ELLIPSIZE_END);
 	color.red = 0xee * 255; color.green = 0xee * 255; color.blue = 0x55 * 255;
 	gtk_widget_modify_bg(GTK_WIDGET(infoLabelBox), GTK_STATE_NORMAL, &color);
 	gtk_widget_modify_font(infoLabel, pango_font_description_from_string("sansserif 9"));
@@ -2621,12 +2612,12 @@ int main(int argc, char *argv[]) {
 	/* Signalling stuff */
 	#ifndef NO_COMPOSITING
 	if(optionHideChessboardLevel > 1) {
-		g_signal_connect(window, "expose-event",
-			G_CALLBACK(exposeCb), NULL);
+		g_signal_connect(window, "draw",
+			G_CALLBACK(drawCb), NULL);
 		g_signal_connect(window, "screen-changed",
 			G_CALLBACK(alphaScreenChangedCb), NULL);
-		g_signal_connect(imageWidget, "expose-event",
-			G_CALLBACK(exposeCb), NULL);
+		g_signal_connect(imageWidget, "draw",
+			G_CALLBACK(drawCb), NULL);
 		g_signal_connect(imageWidget, "screen-changed",
 			G_CALLBACK(alphaScreenChangedCb), NULL);
 	}
@@ -2662,7 +2653,7 @@ int main(int argc, char *argv[]) {
 			optionUseInotify = FALSE;
 		}
 		else {
-			gdk_input_add(inotifyFd, GDK_INPUT_READ, inotifyCb, NULL);
+			g_io_add_watch(g_io_channel_unix_new(inotifyFd), G_IO_IN, inotifyCb, NULL);
 			inotifyWd = inotify_add_watch(inotifyFd, currentFile->fileName, IN_CLOSE_WRITE);
 		}
 	}
